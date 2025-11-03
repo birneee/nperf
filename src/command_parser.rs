@@ -3,16 +3,16 @@ use std::path;
 use clap::Parser;
 use log::{error, info, warn};
 
-use crate::{io_uring::{UringMode, UringSqFillingMode, UringTaskWork}, util::{self, statistic::{MultiplexPort, OutputFormat, Parameter, SimulateConnection, UringParameter}, ExchangeFunction, IOModel, NPerfMode}};
+use crate::{io_uring::{UringMode, UringSqFillingMode, UringTaskWork}, util::{self, statistic::{MultiplexPort, OutputFormat, Parameter, SimulateConnection, UringParameter}, ExchangeFunction, IOModel, UDPerfMode}};
 use crate::net::{self, socket_options::SocketOptions};
 
 #[derive(Parser,Default,Debug)]
 #[clap(version, about="A network performance measurement tool")]
 #[allow(non_camel_case_types)]
-pub struct nPerf {
+pub struct udperf {
     /// Mode of operation: sender or receiver
     #[arg(default_value_t, value_enum)]
-    mode: NPerfMode,
+    mode: UDPerfMode,
 
     /// IP address to measure against/listen on
     #[arg(short = 'a',long, default_value_t = String::from("0.0.0.0"))]
@@ -66,7 +66,7 @@ pub struct nPerf {
     #[arg(long, default_value_t = crate::DEFAULT_GSO_BUFFER_SIZE)]
     with_gso_buffer: u32,
 
-    /// Set the transmit buffer size. Multiple smaller datagrams can be send with one packet of MSS size. The MSS is the size of the packets sent out by nPerf. Gets overwritten by GSO/GRO buffer size if GSO/GRO is enabled.
+    /// Set the transmit buffer size. Multiple smaller datagrams can be send with one packet of MSS size. The MSS is the size of the packets sent out by udperf. Gets overwritten by GSO/GRO buffer size if GSO/GRO is enabled.
     #[arg(long, default_value_t = crate::DEFAULT_MSS)]
     with_mss: u32,
 
@@ -103,11 +103,11 @@ pub struct nPerf {
     output_file_path: path::PathBuf,
 
     /// Test label which appears in the output file, if multiple tests are run in parallel. Useful for benchmark automation.
-    #[arg(long, default_value_t = String::from("nperf-test"))]
+    #[arg(long, default_value_t = String::from("udperf-test"))]
     label_test: String,
 
     /// Run label which appears in the output file, to differentiate between multiple different runs which are executed within a single test. Useful for benchmark automation.
-    #[arg(long, default_value_t = String::from("run-nperf"))]
+    #[arg(long, default_value_t = String::from("run-udperf"))]
     label_run: String,
 
     /// Repetition label which appears in the output file, to differentiate between multiple different repetitions which are executed for a single run. Useful for benchmark automation.
@@ -163,22 +163,22 @@ pub struct nPerf {
     markdown_help: bool,
 }
 
-impl nPerf {
+impl udperf {
     pub fn new() -> Self {
         let _ = env_logger::try_init();
-        nPerf::parse()
+        udperf::parse()
     }
 
     pub fn set_args(self, args: Vec<&str>) -> Self {
         let mut args = args;
-        args.insert(0, "nPerf");
+        args.insert(0, "udperf");
         let args: Vec<String> = args.iter().map(|x| x.to_string()).collect();
-        nPerf::parse_from(args)
+        udperf::parse_from(args)
     }
 
     pub fn parse_parameter(&self) -> Option<util::statistic::Parameter> {
         if self.markdown_help {
-            clap_markdown::print_help_markdown::<nPerf>();
+            clap_markdown::print_help_markdown::<udperf>();
             return None;
         }
     
@@ -258,11 +258,11 @@ impl nPerf {
             return None;
         }
 
-        if parameter.mode == util::NPerfMode::Sender && self.multiplex_port_receiver == MultiplexPort::Sharding && (self.multiplex_port == MultiplexPort::Sharing || self.multiplex_port == MultiplexPort::Sharding ) {
+        if parameter.mode == util::UDPerfMode::Sender && self.multiplex_port_receiver == MultiplexPort::Sharding && (self.multiplex_port == MultiplexPort::Sharing || self.multiplex_port == MultiplexPort::Sharding ) {
             warn!("Sharding on receiver side doesn't work, if sender side is set to sharing or sharding (uses one port), since all traffic would be balanced to one thread (see man for SO_REUSEPORT)!");
         }
 
-        if parameter.mode == util::NPerfMode::Receiver && self.multiplex_port != MultiplexPort::Individual {
+        if parameter.mode == util::UDPerfMode::Receiver && self.multiplex_port != MultiplexPort::Individual {
             warn!("Can't set sender multiplexing on receiver side!");
         }
 
@@ -273,7 +273,7 @@ impl nPerf {
             warn!("If receiver/sender is running on the same machine, with the same amount of threads, multiple threads are going to run on the same core! Available cores: {}", cores_amount);
         }
 
-        if parameter.mode == util::NPerfMode::Receiver && self.time != crate::DEFAULT_DURATION {
+        if parameter.mode == util::UDPerfMode::Receiver && self.time != crate::DEFAULT_DURATION {
             warn!("Time is ignored in receiver mode!");
         }
 
@@ -296,7 +296,7 @@ impl nPerf {
             return None;
         }
 
-        if self.io_model == IOModel::IoUring && self.uring_mode == UringMode::Zerocopy && parameter.mode != util::NPerfMode::Sender {
+        if self.io_model == IOModel::IoUring && self.uring_mode == UringMode::Zerocopy && parameter.mode != util::UDPerfMode::Sender {
             warn!("Zero copy is only available with io_uring on the sender!");
             return None;
         }
@@ -306,7 +306,7 @@ impl nPerf {
             return None;
         }
 
-        if self.interval > 0.0 && self.time == 0 && self.mode == NPerfMode::Receiver {
+        if self.interval > 0.0 && self.time == 0 && self.mode == UDPerfMode::Receiver {
             error!("Interval is set but time is 0! Time must be set when interval output is enabled!");
             return None;
         }
@@ -318,7 +318,7 @@ impl nPerf {
 
         if self.bandwidth > 0 {
             // Check if bandwidth would overflow
-            if self.mode == NPerfMode::Receiver {
+            if self.mode == UDPerfMode::Receiver {
                 warn!("Bandwidth limitation is only available on the sender side! Parameter is ignored");
                 parameter.socket_options.socket_pacing_rate = 0;
             } else if self.bandwidth as u128 / 8 / 1000 / 1000 >= u64::MAX.into() {
@@ -362,8 +362,8 @@ impl nPerf {
     }
 
 
-    fn parse_socket_options(&self, mode: NPerfMode) -> SocketOptions {
-        let gso = if self.with_gsro && mode == util::NPerfMode::Sender {
+    fn parse_socket_options(&self, mode: UDPerfMode) -> SocketOptions {
+        let gso = if self.with_gsro && mode == util::UDPerfMode::Sender {
             Some(self.datagram_size)
         } else {
             None
@@ -379,11 +379,11 @@ impl nPerf {
             info!("Setting udp buffer sizes with recv {} and send {}", recv_buffer_size.unwrap(), send_buffer_size.unwrap());
         }
 
-        let gro = mode == util::NPerfMode::Receiver && self.with_gsro;
+        let gro = mode == util::UDPerfMode::Receiver && self.with_gsro;
 
         let reuseport = match mode {
-            NPerfMode::Sender => self.multiplex_port == MultiplexPort::Sharding,
-            NPerfMode::Receiver => self.multiplex_port_receiver == MultiplexPort::Sharding,
+            UDPerfMode::Sender => self.multiplex_port == MultiplexPort::Sharding,
+            UDPerfMode::Receiver => self.multiplex_port_receiver == MultiplexPort::Sharding,
         };
 
         // Convert Mbit/s total to byte/s per thread
